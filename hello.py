@@ -8,6 +8,24 @@ def chunker(text, chunk_size=1000, overlap=200  ):
         chunks.append(text[i : i + chunk_size])
     return chunks
 
+## def get_embedding(text)
+## TODO: workhome Implementar la función get_embedding
+
+## def populate_embeddings(chunks)
+## TODO: workhome Implementar la función populate_embeddings
+## Opciones PostGres/Supabase
+## SQLlite
+## Memoria / Python
+## Especializadas en esto: Pinecone
+
+## def query_embeddings(query)
+## Recibo la pregunta, hago el emmbedding, busco en la base de datos, armo el prompt. 
+## Prompt El usuario ha preguntado esto y el contexto es este (sumando los chunks)
+## TODO: workhome Implementar la función query_embeddings
+
+
+
+
 def main():
     # Carga las variables de entorno desde el archivo .env
     load_dotenv()
