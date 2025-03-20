@@ -31,3 +31,9 @@ ENV/
 uv.lock
 *.toml
 .python-version
+
+# Base de datos
+data/
+*.db
+*.sqlite
+*.sqlite3

@@ -2,10 +2,46 @@ import openai
 import os
 from dotenv import load_dotenv
 
-def chunker(text, chunk_size=1000, overlap=200  ):
+def chunker(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
+    """
+    Divide un texto en chunks de tamaño fijo con solapamiento.
+    
+    Args:
+        text: El texto a dividir
+        chunk_size: Tamaño de cada chunk
+        overlap: Número de caracteres que se solapan entre chunks consecutivos
+    
+    Returns:
+        Lista de chunks
+    """
+    if not text:
+        return []
+        
     chunks = []
-    for i in range(0, len(text), chunk_size - overlap):
-        chunks.append(text[i : i + chunk_size])
+    start = 0
+    
+    while start < len(text):
+        # Si es el primer chunk, no necesitamos retroceder
+        if start == 0:
+            end = chunk_size
+        else:
+            # Para los siguientes chunks, retrocedemos 'overlap' caracteres
+            end = start + chunk_size - overlap
+            
+        # Si llegamos al final del texto
+        if end > len(text):
+            end = len(text)
+            
+        # Añadir el chunk actual
+        chunks.append(text[start:end])
+        
+        # Si llegamos al final del texto, terminamos
+        if end == len(text):
+            break
+            
+        # Actualizar el punto de inicio para el siguiente chunk
+        start = end
+        
     return chunks
 
 ## def get_embedding(text)
