@@ -3,15 +3,25 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
 import numpy as np
-import pickle
 import logging
+import sqlite_vec
+import struct
+
+def serialize(vector: List[float]) -> bytes:
+    """Serializa una lista de floats en formato de bytes compacto"""
+    return struct.pack("%sf" % len(vector), *vector)
 
 class Database:
     def __init__(self):
         self.db_path = Path("data") / "catalogo.db"
         
     def get_connection(self):
-        return sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        # Habilitar y cargar la extensión sqlite-vec
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        return conn
     
     def insert_chunk(self, ruta_archivo: str, titulo: str, contenido: str, 
                     embedding: np.ndarray, inicio: int, fin: int, test_mode: bool = False) -> int:
@@ -23,21 +33,25 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # Convertir el embedding a bytes
         if test_mode:
-            logging.info(f"Convirtiendo embedding a bytes (tamaño: {embedding.shape})")
+            logging.info(f"Insertando metadatos del chunk")
         
-        embedding_bytes = pickle.dumps(embedding)
-        
-        if test_mode:
-            logging.info(f"Insertando chunk en la base de datos")
-        
+        # Insertar metadatos
         cursor.execute('''
-        INSERT INTO chunks (ruta_archivo, titulo, contenido, embedding, inicio, fin)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ''', (ruta_archivo, titulo, contenido, embedding_bytes, inicio, fin))
+        INSERT INTO chunks_metadata (ruta_archivo, titulo, contenido, inicio, fin)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (ruta_archivo, titulo, contenido, inicio, fin))
         
         chunk_id = cursor.lastrowid
+        
+        if test_mode:
+            logging.info(f"Insertando embedding en la tabla virtual")
+        
+        # Insertar embedding en la tabla virtual
+        cursor.execute('''
+        INSERT INTO chunks_embeddings (id, embedding)
+        VALUES (?, ?)
+        ''', (chunk_id, serialize(embedding.tolist())))
         
         if test_mode:
             logging.info(f"Chunk insertado con ID: {chunk_id}")
@@ -61,7 +75,14 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        cursor.execute('SELECT * FROM chunks WHERE id = ?', (chunk_id,))
+        # Obtener metadatos
+        cursor.execute('''
+        SELECT m.*, e.embedding 
+        FROM chunks_metadata m
+        JOIN chunks_embeddings e ON m.id = e.id
+        WHERE m.id = ?
+        ''', (chunk_id,))
+        
         chunk = cursor.fetchone()
         conn.close()
         
@@ -69,12 +90,6 @@ class Database:
             if test_mode:
                 logging.warning(f"No se encontró el chunk con ID: {chunk_id}")
             return None
-            
-        # Convertir el embedding de bytes a numpy array
-        if test_mode:
-            logging.info("Convirtiendo embedding de bytes a numpy array")
-        
-        embedding = pickle.loads(chunk[4])
         
         if test_mode:
             end_time = datetime.now()
@@ -86,10 +101,10 @@ class Database:
             'ruta_archivo': chunk[1],
             'titulo': chunk[2],
             'contenido': chunk[3],
-            'embedding': embedding,
-            'inicio': chunk[5],
-            'fin': chunk[6],
-            'fecha_creacion': chunk[7]
+            'inicio': chunk[4],
+            'fin': chunk[5],
+            'fecha_creacion': chunk[6],
+            'embedding': np.array(chunk[7])
         }
     
     def buscar_chunks_similares(self, embedding: np.ndarray, 
@@ -102,39 +117,36 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # Obtener todos los chunks
-        cursor.execute('SELECT * FROM chunks')
+        # Usar la función de similitud de sqlite-vec
+        cursor.execute('''
+        SELECT
+            m.*,
+            e.embedding,
+            distance
+        FROM chunks_embeddings e
+        LEFT JOIN chunks_metadata m ON m.id = e.id
+        WHERE e.embedding MATCH ?
+            AND k = ?
+        ORDER BY distance
+        ''', (serialize(embedding.tolist()), top_k))
+        
         chunks = cursor.fetchall()
         conn.close()
         
         if test_mode:
-            logging.info(f"Recuperados {len(chunks)} chunks para comparar")
+            logging.info(f"Recuperados {len(chunks)} chunks similares")
         
-        # Calcular similitudes
-        similitudes = []
-        for chunk in chunks:
-            chunk_embedding = pickle.loads(chunk[4])
-            similitud = np.dot(embedding, chunk_embedding) / (
-                np.linalg.norm(embedding) * np.linalg.norm(chunk_embedding)
-            )
-            similitudes.append((similitud, chunk))
-        
-        # Ordenar por similitud y tomar los top_k
-        similitudes.sort(reverse=True)
-        resultados = []
-        
-        for _, chunk in similitudes[:top_k]:
-            chunk_embedding = pickle.loads(chunk[4])
-            resultados.append({
-                'id': chunk[0],
-                'ruta_archivo': chunk[1],
-                'titulo': chunk[2],
-                'contenido': chunk[3],
-                'embedding': chunk_embedding,
-                'inicio': chunk[5],
-                'fin': chunk[6],
-                'fecha_creacion': chunk[7]
-            })
+        resultados = [{
+            'id': chunk[0],
+            'ruta_archivo': chunk[1],
+            'titulo': chunk[2],
+            'contenido': chunk[3],
+            'inicio': chunk[4],
+            'fin': chunk[5],
+            'fecha_creacion': chunk[6],
+            'embedding': np.array(chunk[7]),
+            'similitud': chunk[8]
+        } for chunk in chunks]
         
         if test_mode:
             end_time = datetime.now()
@@ -153,9 +165,11 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-        SELECT * FROM chunks 
-        WHERE ruta_archivo = ?
-        ORDER BY inicio
+        SELECT m.*, e.embedding 
+        FROM chunks_metadata m
+        JOIN chunks_embeddings e ON m.id = e.id
+        WHERE m.ruta_archivo = ?
+        ORDER BY m.inicio
         ''', (ruta_archivo,))
         
         chunks = cursor.fetchall()
@@ -169,10 +183,10 @@ class Database:
             'ruta_archivo': chunk[1],
             'titulo': chunk[2],
             'contenido': chunk[3],
-            'embedding': pickle.loads(chunk[4]),
-            'inicio': chunk[5],
-            'fin': chunk[6],
-            'fecha_creacion': chunk[7]
+            'inicio': chunk[4],
+            'fin': chunk[5],
+            'fecha_creacion': chunk[6],
+            'embedding': np.array(chunk[7])
         } for chunk in chunks]
         
         if test_mode:
