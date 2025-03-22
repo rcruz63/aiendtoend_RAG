@@ -1,63 +1,81 @@
-import sqlite3
+import logging
 from pathlib import Path
-import pickle
+import apsw
+import sqlite_vec
 import numpy as np
 
-def validate_database():
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+def get_connection():
+    """Obtiene una conexión a la base de datos con la extensión sqlite-vec cargada"""
     db_path = Path("data") / "catalogo.db"
-    
-    # Conectar a la base de datos
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Obtener estadísticas básicas
-    cursor.execute("SELECT COUNT(*) FROM chunks")
-    total_chunks = cursor.fetchone()[0]
-    print(f"\nTotal de chunks en la base de datos: {total_chunks}")
-    
-    # Obtener información de los documentos únicos
-    cursor.execute("""
-        SELECT DISTINCT titulo, ruta_archivo, COUNT(*) as num_chunks 
-        FROM chunks 
-        GROUP BY titulo, ruta_archivo
-    """)
-    documentos = cursor.fetchall()
-    
-    print("\nDocumentos procesados:")
-    for doc in documentos:
-        print(f"\nTítulo: {doc[0]}")
-        print(f"Ruta: {doc[1]}")
-        print(f"Número de chunks: {doc[2]}")
+    conn = apsw.Connection(str(db_path))
+    conn.enableloadextension(True)
+    sqlite_vec.load(conn)
+    conn.enableloadextension(False)
+    return conn
+
+def validar_base_datos():
+    """Valida el contenido de la base de datos"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
         
-        # Mostrar los primeros 3 chunks de cada documento
-        cursor.execute("""
-            SELECT id, contenido, inicio, fin 
-            FROM chunks 
-            WHERE titulo = ? 
-            LIMIT 3
-        """, (doc[0],))
+        # 1. Verificar estructura de las tablas
+        logging.info("\n=== Estructura de las tablas ===")
+        cursor.execute("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view')")
+        tablas = cursor.fetchall()
+        logging.info("Tablas y vistas encontradas:")
+        for tabla in tablas:
+            logging.info(f"- {tabla[0]} ({tabla[1]})")
         
-        chunks = cursor.fetchall()
-        print("\nPrimeros 3 chunks:")
-        for chunk in chunks:
-            print(f"\nID: {chunk[0]}")
-            print(f"Contenido: {chunk[1][:100]}...")  # Mostrar solo los primeros 100 caracteres
-            print(f"Posición: {chunk[2]} - {chunk[3]}")
-    
-    # Verificar que los embeddings son válidos
-    cursor.execute("SELECT id, embedding FROM chunks LIMIT 1")
-    chunk = cursor.fetchone()
-    if chunk:
+        # 2. Contar registros en cada tabla
+        logging.info("\n=== Conteo de registros ===")
+        cursor.execute("SELECT COUNT(*) FROM chunks_metadata")
+        total_chunks = cursor.fetchone()[0]
+        logging.info(f"Total de chunks: {total_chunks}")
+        
+        # Verificar si la tabla de embeddings existe y contar registros
         try:
-            embedding = pickle.loads(chunk[1])
-            print(f"\nVerificación de embedding:")
-            print(f"ID del chunk: {chunk[0]}")
-            print(f"Dimensiones del embedding: {embedding.shape}")
-            print(f"Tipo de datos: {embedding.dtype}")
+            cursor.execute("SELECT COUNT(*) FROM chunks_embeddings")
+            total_embeddings = cursor.fetchone()[0]
+            logging.info(f"Total de embeddings: {total_embeddings}")
         except Exception as e:
-            print(f"\nError al cargar el embedding: {e}")
-    
-    conn.close()
+            logging.error(f"✗ Error al acceder a chunks_embeddings: {e}")
+            total_embeddings = 0
+        
+        # 3. Verificar documentos procesados
+        logging.info("\n=== Documentos procesados ===")
+        cursor.execute("""
+        SELECT DISTINCT ruta_archivo, titulo, COUNT(*) as num_chunks
+        FROM chunks_metadata
+        GROUP BY ruta_archivo, titulo
+        ORDER BY ruta_archivo
+        """)
+        
+        for doc in cursor.fetchall():
+            logging.info(f"\nDocumento: {doc[1]}")
+            logging.info(f"Ruta: {doc[0]}")
+            logging.info(f"Chunks: {doc[2]}")
+        
+        # 4. Verificar integridad básica
+        logging.info("\n=== Verificación de integridad ===")
+        if total_embeddings == 0:
+            logging.error("✗ No hay embeddings en la base de datos")
+        elif total_chunks == total_embeddings:
+            logging.info("✓ El número de chunks coincide con el número de embeddings")
+        else:
+            logging.error(f"✗ Discrepancia: {total_chunks} chunks vs {total_embeddings} embeddings")
+        
+        conn.close()
+        
+    except Exception as e:
+        logging.error(f"Error al validar la base de datos: {e}")
+        raise
 
 if __name__ == "__main__":
-    validate_database() 
+    validar_base_datos() 

@@ -1,4 +1,6 @@
 openai>=1.12.0
 python-dotenv>=1.0.0
 numpy>=1.24.0
-tqdm>=4.66.0 
+tqdm>=4.65.0
+sqlite-vec>=0.1.0
+apsw>=3.45.0.0 

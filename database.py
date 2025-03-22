@@ -1,4 +1,3 @@
-import sqlite3
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
@@ -6,6 +5,7 @@ import numpy as np
 import logging
 import sqlite_vec
 import struct
+import apsw
 
 def serialize(vector: List[float]) -> bytes:
     """Serializa una lista de floats en formato de bytes compacto"""
@@ -16,55 +16,72 @@ class Database:
         self.db_path = Path("data") / "catalogo.db"
         
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = apsw.Connection(str(self.db_path))
         # Habilitar y cargar la extensión sqlite-vec
-        conn.enable_load_extension(True)
+        conn.enableloadextension(True)
         sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
+        conn.enableloadextension(False)
         return conn
     
     def insert_chunk(self, ruta_archivo: str, titulo: str, contenido: str, 
                     embedding: np.ndarray, inicio: int, fin: int, test_mode: bool = False) -> int:
-        """Inserta un chunk con su embedding y retorna su ID"""
-        if test_mode:
-            logging.info(f"Conectando a la base de datos: {self.db_path}")
-            start_time = datetime.now()
+        """
+        Inserta un chunk y su embedding en la base de datos.
         
+        Args:
+            ruta_archivo: Ruta del archivo original
+            titulo: Título del documento
+            contenido: Contenido del chunk
+            embedding: Vector de embedding
+            inicio: Posición inicial en el documento original
+            fin: Posición final en el documento original
+            test_mode: Si es True, muestra información detallada
+            
+        Returns:
+            int: ID del chunk insertado
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        if test_mode:
-            logging.info(f"Insertando metadatos del chunk")
-        
-        # Insertar metadatos
-        cursor.execute('''
-        INSERT INTO chunks_metadata (ruta_archivo, titulo, contenido, inicio, fin)
-        VALUES (?, ?, ?, ?, ?)
-        ''', (ruta_archivo, titulo, contenido, inicio, fin))
-        
-        chunk_id = cursor.lastrowid
-        
-        if test_mode:
-            logging.info(f"Insertando embedding en la tabla virtual")
-        
-        # Insertar embedding en la tabla virtual
-        cursor.execute('''
-        INSERT INTO chunks_embeddings (id, embedding)
-        VALUES (?, ?)
-        ''', (chunk_id, serialize(embedding.tolist())))
-        
-        if test_mode:
-            logging.info(f"Chunk insertado con ID: {chunk_id}")
-        
-        conn.commit()
-        conn.close()
-        
-        if test_mode:
-            end_time = datetime.now()
-            duration = (end_time - start_time).total_seconds()
-            logging.info(f"Operación de base de datos completada en {duration:.2f} segundos")
-        
-        return chunk_id
+        try:
+            # Iniciar transacción
+            cursor.execute("BEGIN TRANSACTION")
+            
+            # Insertar metadatos
+            cursor.execute('''
+            INSERT INTO chunks_metadata 
+            (ruta_archivo, titulo, contenido, inicio, fin)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (ruta_archivo, titulo, contenido, inicio, fin))
+            
+            # Obtener el ID del último registro insertado
+            cursor.execute("SELECT last_insert_rowid()")
+            chunk_id = cursor.fetchone()[0]
+            
+            # Serializar el embedding
+            embedding_bytes = serialize(embedding.tolist())
+            
+            # Insertar embedding
+            cursor.execute('''
+            INSERT INTO chunks_embeddings (id, embedding)
+            VALUES (?, ?)
+            ''', (chunk_id, embedding_bytes))
+            
+            # Confirmar transacción
+            cursor.execute("COMMIT")
+            
+            if test_mode:
+                logging.info(f"Chunk insertado con ID: {chunk_id}")
+            
+            return chunk_id
+            
+        except Exception as e:
+            # En caso de error, revertir cambios
+            cursor.execute("ROLLBACK")
+            logging.error(f"Error al insertar chunk: {e}")
+            raise
+        finally:
+            conn.close()
     
     def get_chunk(self, chunk_id: int, test_mode: bool = False) -> Optional[Dict[str, Any]]:
         """Obtiene un chunk y su embedding por ID"""

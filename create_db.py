@@ -1,4 +1,3 @@
-import sqlite3
 import os
 from pathlib import Path
 from typing import List, Dict, Generator
@@ -12,6 +11,8 @@ import logging
 from datetime import datetime
 import sqlite_vec
 import struct
+import apsw
+import platform
 
 # Configurar logging
 logging.basicConfig(
@@ -19,6 +20,40 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+def verificar_entorno():
+    """
+    Verifica que el entorno está correctamente configurado.
+    """
+    logging.info(f"Sistema operativo: {platform.system()} {platform.release()}")
+    logging.info(f"Python: {platform.python_version()}")
+    
+    try:
+        # Verificar que podemos cargar la extensión sqlite-vec
+        conn = apsw.Connection(':memory:')
+        conn.enableloadextension(True)
+        sqlite_vec.load(conn)
+        conn.enableloadextension(False)
+        conn.close()
+        logging.info("✓ Extensión sqlite-vec cargada correctamente")
+    except Exception as e:
+        logging.error(f"✗ Error al cargar sqlite-vec: {e}")
+        raise
+    
+    # Verificar que tenemos acceso al directorio de datos
+    data_dir = Path("data")
+    try:
+        data_dir.mkdir(exist_ok=True)
+        logging.info("✓ Directorio de datos accesible")
+    except Exception as e:
+        logging.error(f"✗ Error al acceder al directorio de datos: {e}")
+        raise
+    
+    # Verificar que tenemos la API key de OpenAI
+    if not os.getenv("OPENAI_API_KEY"):
+        logging.error("✗ No se encontró OPENAI_API_KEY en las variables de entorno")
+        raise ValueError("OPENAI_API_KEY no configurada")
+    logging.info("✓ API key de OpenAI configurada")
 
 def serialize(vector: List[float]) -> bytes:
     """Serializa una lista de floats en formato de bytes compacto"""
@@ -33,7 +68,10 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 # DATA_PATH = "catalogos_md"
 DATA_PATH = "test_catalogo"
 
-def create_database():
+def init_database():
+    """
+    Inicializa la base de datos desde cero, eliminando todas las tablas existentes.
+    """
     # Crear el directorio data si no existe
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
@@ -41,34 +79,24 @@ def create_database():
     # Ruta de la base de datos
     db_path = data_dir / "catalogo.db"
     
+    # Eliminar la base de datos si existe
+    if db_path.exists():
+        logging.info("Eliminando base de datos existente...")
+        db_path.unlink()
+    
     # Conectar a la base de datos (la creará si no existe)
-    conn = sqlite3.connect(db_path)
+    conn = apsw.Connection(str(db_path))
     
     # Habilitar y cargar la extensión sqlite-vec
-    conn.enable_load_extension(True)
+    conn.enableloadextension(True)
     sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    conn.enableloadextension(False)
     
     cursor = conn.cursor()
     
-    # Crear tabla de control para la migración
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS db_version (
-        version INTEGER PRIMARY KEY,
-        fecha_migracion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Verificar si ya hemos migrado a sqlite-vec
-    cursor.execute('SELECT version FROM db_version')
-    version = cursor.fetchone()
-    
-    if not version or version[0] < 1:
-        logging.info("Primera ejecución con sqlite-vec, eliminando tablas antiguas...")
-        # Eliminar tablas existentes si existen
-        cursor.execute('DROP TABLE IF EXISTS chunks')
-        cursor.execute('DROP TABLE IF EXISTS chunks_metadata')
-        cursor.execute('DROP TABLE IF EXISTS chunks_embeddings')
+    try:
+        # Iniciar transacción
+        cursor.execute("BEGIN TRANSACTION")
         
         # Crear tabla de metadatos
         cursor.execute('''
@@ -95,15 +123,77 @@ def create_database():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_titulo ON chunks_metadata(titulo)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_ruta ON chunks_metadata(ruta_archivo)')
         
-        # Marcar como migrado
-        cursor.execute('INSERT OR REPLACE INTO db_version (version) VALUES (1)')
-        conn.commit()
-        logging.info("Migración a sqlite-vec completada")
-    else:
-        logging.info("Base de datos ya migrada a sqlite-vec, manteniendo datos existentes")
+        # Confirmar transacción
+        cursor.execute("COMMIT")
+        
+    except Exception as e:
+        # En caso de error, revertir cambios
+        cursor.execute("ROLLBACK")
+        raise e
+    finally:
+        conn.close()
+        logging.info(f"Base de datos inicializada en: {db_path}")
+
+def create_database():
+    """
+    Crea la base de datos si no existe, sin modificar datos existentes.
+    """
+    # Crear el directorio data si no existe
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
     
-    conn.close()
-    logging.info(f"Base de datos lista en: {db_path}")
+    # Ruta de la base de datos
+    db_path = data_dir / "catalogo.db"
+    
+    # Conectar a la base de datos (la creará si no existe)
+    conn = apsw.Connection(str(db_path))
+    
+    # Habilitar y cargar la extensión sqlite-vec
+    conn.enableloadextension(True)
+    sqlite_vec.load(conn)
+    conn.enableloadextension(False)
+    
+    cursor = conn.cursor()
+    
+    try:
+        # Iniciar transacción
+        cursor.execute("BEGIN TRANSACTION")
+        
+        # Crear tabla de metadatos si no existe
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chunks_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ruta_archivo TEXT NOT NULL,
+            titulo TEXT NOT NULL,
+            contenido TEXT NOT NULL,
+            inicio INTEGER NOT NULL,
+            fin INTEGER NOT NULL,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # Crear tabla virtual para los embeddings si no existe
+        cursor.execute('''
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_embeddings USING vec0(
+            id INTEGER PRIMARY KEY,
+            embedding FLOAT[1536]  -- OpenAI ada-002 usa 1536 dimensiones
+        )
+        ''')
+        
+        # Crear índices si no existen
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_titulo ON chunks_metadata(titulo)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_ruta ON chunks_metadata(ruta_archivo)')
+        
+        # Confirmar transacción
+        cursor.execute("COMMIT")
+        
+    except Exception as e:
+        # En caso de error, revertir cambios
+        cursor.execute("ROLLBACK")
+        raise e
+    finally:
+        conn.close()
+        logging.info(f"Base de datos lista en: {db_path}")
 
 def chunker(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
     """
@@ -294,9 +384,30 @@ def generate_rag(test_mode: bool = False):
         except Exception as e:
             logging.error(f"Error al procesar {documento['titulo']}: {e}")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Genera el RAG a partir de documentos markdown')
-    parser.add_argument('-t', '--test', action='store_true', help='Ejecutar en modo test')
+def main():
+    parser = argparse.ArgumentParser(description='Genera embeddings para documentos markdown')
+    parser.add_argument('-t', '--test', action='store_true', help='Modo test con logging detallado')
+    parser.add_argument('-i', '--init', action='store_true', help='Inicializar base de datos desde cero')
     args = parser.parse_args()
     
+    # Configurar logging
+    logging.basicConfig(
+        level=logging.INFO if args.test else logging.WARNING,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    # Verificar entorno
+    verificar_entorno()
+    
+    # Inicializar base de datos si se solicita
+    if args.init:
+        init_database()
+    else:
+        # Crear base de datos si no existe
+        create_database()
+    
+    # Generar RAG
     generate_rag(test_mode=args.test)
+
+if __name__ == "__main__":
+    main()
