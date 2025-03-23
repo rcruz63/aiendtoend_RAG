@@ -420,7 +420,7 @@ def documento_procesado(db: Database, ruta_archivo: str) -> Tuple[bool, int, int
     finally:
         conn.close()
 
-def procesar_documento(db: Database, documento: Dict[str, str], test_mode: bool = False) -> None:
+def procesar_documento(db: Database, documento: Dict[str, str], chunk_size: int = 1000, overlap: int = 200, test_mode: bool = False) -> None:
     """
     Procesa un documento individual, dividiéndolo en chunks y guardando sus embeddings.
     
@@ -433,15 +433,18 @@ def procesar_documento(db: Database, documento: Dict[str, str], test_mode: bool 
     Args:
         db (Database): Instancia de la base de datos
         documento (Dict[str, str]): Documento a procesar
+        chunk_size (int): Tamaño de cada chunk en caracteres
+        overlap (int): Número de caracteres que se solapan entre chunks
         test_mode (bool): Si True, muestra información detallada
     """
     logging.info(f"Procesando documento: {documento['titulo']}")
     
     if test_mode:
         logging.info(f"Tamaño del documento: {len(documento['contenido'])} caracteres")
+        logging.info(f"Parámetros: chunk_size={chunk_size}, overlap={overlap}")
     
     # Dividir en chunks
-    chunks = chunker(documento['contenido'])
+    chunks = chunker(documento['contenido'], chunk_size=chunk_size, overlap=overlap)
     total_chunks = len(chunks)
     logging.info(f"Documento dividido en {total_chunks} chunks")
     
@@ -466,12 +469,24 @@ def procesar_documento(db: Database, documento: Dict[str, str], test_mode: bool 
                 if i % 100 == 0 or i == total_chunks:
                     logging.info(f"Procesados {i}/{total_chunks} chunks")
             
-            # Calcular el embedding
-            embedding = get_embedding(chunk, test_mode)
-            
             # Calcular las posiciones en el documento original
             inicio = documento['contenido'].find(chunk)
             fin = inicio + len(chunk)
+            
+            # Verificar si el chunk ya existe en la base de datos
+            chunks_existentes = db.get_chunks_archivo(documento['ruta_archivo'])
+            chunk_existente = next(
+                (c for c in chunks_existentes if c['inicio'] == inicio and c['fin'] == fin),
+                None
+            )
+            
+            if chunk_existente:
+                if test_mode:
+                    logging.info(f"Chunk ya existe en la base de datos (ID: {chunk_existente['id']})")
+                continue
+            
+            # Calcular el embedding solo si el chunk no existe
+            embedding = get_embedding(chunk, test_mode)
             
             if test_mode:
                 logging.info(f"Guardando chunk en la base de datos (posiciones {inicio}-{fin})")
@@ -494,7 +509,7 @@ def procesar_documento(db: Database, documento: Dict[str, str], test_mode: bool 
             logging.error(f"Error al procesar chunk {i} en {documento['titulo']}: {e}")
             raise
 
-def generate_rag(test_mode: bool = False):
+def generate_rag(test_mode: bool = False, chunk_size: int = 1000, overlap: int = 200):
     """
     Genera el sistema RAG procesando todos los documentos Markdown.
     
@@ -505,6 +520,8 @@ def generate_rag(test_mode: bool = False):
     
     Args:
         test_mode (bool): Si True, usa un directorio de prueba y muestra más información
+        chunk_size (int): Tamaño de cada chunk en caracteres
+        overlap (int): Número de caracteres que se solapan entre chunks
     """
     # Seleccionar directorio de datos
     data_path = "test_catalogo" if test_mode else "catalogo_md"
@@ -520,7 +537,7 @@ def generate_rag(test_mode: bool = False):
     documentos = cargar_documentos(data_path)
     for documento in tqdm(documentos, desc="Procesando documentos"):
         try:
-            procesar_documento(db, documento, test_mode)
+            procesar_documento(db, documento, chunk_size, overlap, test_mode)
         except Exception as e:
             logging.error(f"Error al procesar {documento['titulo']}: {e}")
 
@@ -531,6 +548,8 @@ def main():
     Procesa los argumentos de línea de comandos:
     --test (-t): Ejecuta en modo prueba con logging detallado
     --init (-i): Inicializa la base de datos desde cero
+    --chunk-size (-c): Tamaño de cada chunk en caracteres (default: 1000)
+    --overlap (-o): Número de caracteres que se solapan entre chunks (default: 200)
     
     El proceso completo incluye:
     1. Verificación del entorno
@@ -540,6 +559,8 @@ def main():
     parser = argparse.ArgumentParser(description='Genera embeddings para documentos markdown')
     parser.add_argument('-t', '--test', action='store_true', help='Modo test con logging detallado')
     parser.add_argument('-i', '--init', action='store_true', help='Inicializar base de datos desde cero')
+    parser.add_argument('-c', '--chunk-size', type=int, default=1000, help='Tamaño de cada chunk en caracteres (default: 1000)')
+    parser.add_argument('-o', '--overlap', type=int, default=200, help='Número de caracteres que se solapan entre chunks (default: 200)')
     args = parser.parse_args()
     
     # Configurar logging
@@ -560,8 +581,8 @@ def main():
         # Crear base de datos si no existe
         create_database()
     
-    # Generar RAG
-    generate_rag(test_mode=args.test)
+    # Generar RAG con los parámetros especificados
+    generate_rag(test_mode=args.test, chunk_size=args.chunk_size, overlap=args.overlap)
 
 if __name__ == "__main__":
     main()
