@@ -1,3 +1,27 @@
+"""
+Script para la creación y gestión de una base de datos vectorial SQLite para un sistema RAG.
+
+Este script implementa la creación y gestión de una base de datos SQLite que almacena
+documentos y sus embeddings vectoriales para su uso en un sistema de Recuperación Aumentada
+por Generación (RAG). Utiliza la extensión sqlite-vec para manejar vectores eficientemente.
+
+Características principales:
+- Creación y gestión de base de datos SQLite con soporte vectorial
+- Procesamiento de documentos Markdown
+- Generación de embeddings usando OpenAI
+- División de textos en chunks con solapamiento
+- Almacenamiento eficiente de metadatos y embeddings
+
+Requisitos:
+- Python 3.6+
+- OpenAI API key configurada en variables de entorno
+- Extensión sqlite-vec instalada
+- Dependencias listadas en requirements.txt
+
+Autor: RCS
+Fecha: 2025-03-22
+"""
+
 import os
 from pathlib import Path
 from typing import List, Dict, Generator
@@ -21,9 +45,28 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
+# Cargar variables de entorno
+load_dotenv()
+
+# Configurar OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# DATA_PATH = "catalogos_md"
+DATA_PATH = "test_catalogo"
+
 def verificar_entorno():
     """
-    Verifica que el entorno está correctamente configurado.
+    Verifica que el entorno está correctamente configurado para la ejecución del script.
+    
+    Realiza las siguientes verificaciones:
+    1. Sistema operativo y versión de Python
+    2. Disponibilidad y carga de la extensión sqlite-vec
+    3. Acceso al directorio de datos
+    4. Configuración de la API key de OpenAI
+    
+    Raises:
+        Exception: Si alguna de las verificaciones falla
+        ValueError: Si no se encuentra la API key de OpenAI
     """
     logging.info(f"Sistema operativo: {platform.system()} {platform.release()}")
     logging.info(f"Python: {platform.python_version()}")
@@ -56,21 +99,32 @@ def verificar_entorno():
     logging.info("✓ API key de OpenAI configurada")
 
 def serialize(vector: List[float]) -> bytes:
-    """Serializa una lista de floats en formato de bytes compacto"""
+    """
+    Serializa una lista de números flotantes en un formato de bytes compacto.
+    
+    Args:
+        vector (List[float]): Lista de números flotantes a serializar
+        
+    Returns:
+        bytes: Datos serializados en formato de bytes
+    """
     return struct.pack("%sf" % len(vector), *vector)
-
-# Cargar variables de entorno
-load_dotenv()
-
-# Configurar OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# DATA_PATH = "catalogos_md"
-DATA_PATH = "test_catalogo"
 
 def init_database():
     """
     Inicializa la base de datos desde cero, eliminando todas las tablas existentes.
+    
+    Esta función:
+    1. Elimina la base de datos si existe
+    2. Crea una nueva base de datos
+    3. Configura la extensión sqlite-vec
+    4. Crea las tablas necesarias:
+       - chunks_metadata: Almacena metadatos de los fragmentos de texto
+       - chunks_embeddings: Almacena los vectores de embedding
+    5. Crea índices para optimizar las consultas
+    
+    Raises:
+        Exception: Si ocurre algún error durante la inicialización
     """
     # Crear el directorio data si no existe
     data_dir = Path("data")
@@ -136,7 +190,20 @@ def init_database():
 
 def create_database():
     """
-    Crea la base de datos si no existe, sin modificar datos existentes.
+    Crea la base de datos si no existe, preservando los datos existentes.
+    
+    A diferencia de init_database(), esta función:
+    1. No elimina la base de datos existente
+    2. Crea las tablas solo si no existen
+    3. Preserva todos los datos existentes
+    
+    La estructura de la base de datos incluye:
+    - Tabla chunks_metadata: Almacena metadatos de los fragmentos
+    - Tabla chunks_embeddings: Almacena vectores de embedding
+    - Índices para optimización de consultas
+    
+    Raises:
+        Exception: Si ocurre algún error durante la creación
     """
     # Crear el directorio data si no existe
     data_dir = Path("data")
@@ -176,7 +243,7 @@ def create_database():
         cursor.execute('''
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_embeddings USING vec0(
             id INTEGER PRIMARY KEY,
-            embedding FLOAT[1536]  -- OpenAI ada-002 usa 1536 dimensiones
+            embedding FLOAT[1536]  -- OpenAI text-embedding-3-large usa 3072 pero lo limitamos a1536 dimensiones
         )
         ''')
         
@@ -197,15 +264,24 @@ def create_database():
 
 def chunker(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
     """
-    Divide un texto en chunks de tamaño fijo con solapamiento.
+    Divide un texto en fragmentos (chunks) de tamaño fijo con solapamiento.
+    
+    El solapamiento entre chunks ayuda a mantener el contexto y evitar la pérdida
+    de información en los límites de los fragmentos.
     
     Args:
-        text: El texto a dividir
-        chunk_size: Tamaño de cada chunk
-        overlap: Número de caracteres que se solapan entre chunks consecutivos
+        text (str): Texto a dividir
+        chunk_size (int): Tamaño de cada fragmento en caracteres
+        overlap (int): Número de caracteres que se solapan entre fragmentos consecutivos
     
     Returns:
-        Lista de chunks
+        list[str]: Lista de fragmentos de texto
+    
+    Example:
+        >>> texto = "Este es un texto de ejemplo para dividir"
+        >>> chunks = chunker(texto, chunk_size=10, overlap=3)
+        >>> print(chunks)
+        ['Este es un', 'un texto de', 'de ejemplo', 'lo para div']
     """
     if not text:
         return []
@@ -239,13 +315,23 @@ def chunker(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
 
 def get_embedding(text: str, test_mode: bool = False) -> np.ndarray:
     """
-    Obtiene el embedding de un texto usando la API de OpenAI.
+    Obtiene el vector de embedding para un texto usando la API de OpenAI.
+    
+    OLD: Utiliza el modelo text-embedding-ada-002 de OpenAI para generar
+    embeddings de 1536 dimensiones.
+
+    NEW: Utiliza el modelo text-embedding-3-large de OpenAI para generar
+    embeddings de 1536 dimensiones.
     
     Args:
-        text: El texto para el que queremos obtener el embedding
-        
+        text (str): Texto para el que se quiere obtener el embedding
+        test_mode (bool): Si True, muestra información detallada del proceso
+    
     Returns:
-        Array numpy con el embedding
+        np.ndarray: Vector de embedding de dimensión 1536
+    
+    Raises:
+        Exception: Si hay un error en la llamada a la API de OpenAI
     """
     try:
         if test_mode:
@@ -253,7 +339,9 @@ def get_embedding(text: str, test_mode: bool = False) -> np.ndarray:
             start_time = datetime.now()
         
         response = openai.embeddings.create(
-            model="text-embedding-ada-002",
+            # model="text-embedding-ada-002",
+            model="text-embedding-3-large",
+            dimensions=1536,
             input=text
         )
         
@@ -269,7 +357,22 @@ def get_embedding(text: str, test_mode: bool = False) -> np.ndarray:
 
 def cargar_documentos(data_path: str) -> Generator[Dict[str, str], None, None]:
     """
-    Carga los documentos de manera eficiente usando un generador.
+    Carga documentos Markdown de forma eficiente usando un generador.
+    
+    Recorre recursivamente el directorio especificado buscando archivos .md
+    y los carga uno a uno para evitar consumo excesivo de memoria.
+    
+    Args:
+        data_path (str): Ruta al directorio que contiene los documentos
+    
+    Yields:
+        Dict[str, str]: Diccionario con los siguientes campos:
+            - titulo: Nombre del archivo sin extensión
+            - ruta_archivo: Ruta completa al archivo
+            - contenido: Contenido del archivo
+    
+    Raises:
+        Exception: Si hay errores al leer algún archivo
     """
     for archivo in Path(data_path).glob("**/*.md"):
         try:
@@ -286,12 +389,12 @@ def cargar_documentos(data_path: str) -> Generator[Dict[str, str], None, None]:
 
 def documento_procesado(db: Database, ruta_archivo: str) -> bool:
     """
-    Verifica si un documento ya ha sido procesado.
+    Verifica si un documento ya ha sido procesado y almacenado en la base de datos.
     
     Args:
-        db: Instancia de la base de datos
-        ruta_archivo: Ruta del archivo a verificar
-        
+        db (Database): Instancia de la base de datos
+        ruta_archivo (str): Ruta del archivo a verificar
+    
     Returns:
         bool: True si el documento ya está procesado, False en caso contrario
     """
@@ -311,7 +414,24 @@ def documento_procesado(db: Database, ruta_archivo: str) -> bool:
 
 def procesar_documento(db: Database, documento: Dict[str, str], test_mode: bool = False) -> None:
     """
-    Procesa un documento individual, lo divide en chunks y guarda sus embeddings.
+    Procesa un documento individual, dividiéndolo en chunks y guardando sus embeddings.
+    
+    El proceso incluye:
+    1. Verificar si el documento ya está procesado
+    2. Dividir el documento en chunks
+    3. Generar embedding para cada chunk
+    4. Almacenar chunks y embeddings en la base de datos
+    
+    Args:
+        db (Database): Instancia de la base de datos
+        documento (Dict[str, str]): Documento a procesar con campos:
+            - titulo: Título del documento
+            - ruta_archivo: Ruta al archivo
+            - contenido: Contenido del documento
+        test_mode (bool): Si True, muestra información detallada del proceso
+    
+    Raises:
+        Exception: Si hay errores durante el procesamiento
     """
     # Verificar si el documento ya está procesado
     if documento_procesado(db, documento['ruta_archivo']):
@@ -364,7 +484,15 @@ def procesar_documento(db: Database, documento: Dict[str, str], test_mode: bool 
 
 def generate_rag(test_mode: bool = False):
     """
-    Genera el RAG a partir de los documentos md.
+    Genera el sistema RAG procesando todos los documentos Markdown.
+    
+    Este proceso:
+    1. Configura la base de datos
+    2. Carga y procesa los documentos
+    3. Genera y almacena embeddings
+    
+    Args:
+        test_mode (bool): Si True, usa un directorio de prueba y muestra más información
     """
     # Seleccionar directorio de datos
     data_path = "test_catalogo" if test_mode else "catalogo_md"
@@ -385,6 +513,18 @@ def generate_rag(test_mode: bool = False):
             logging.error(f"Error al procesar {documento['titulo']}: {e}")
 
 def main():
+    """
+    Función principal que coordina la ejecución del script.
+    
+    Procesa los argumentos de línea de comandos:
+    --test (-t): Ejecuta en modo prueba con logging detallado
+    --init (-i): Inicializa la base de datos desde cero
+    
+    El proceso completo incluye:
+    1. Verificación del entorno
+    2. Inicialización/creación de la base de datos
+    3. Generación del sistema RAG
+    """
     parser = argparse.ArgumentParser(description='Genera embeddings para documentos markdown')
     parser.add_argument('-t', '--test', action='store_true', help='Modo test con logging detallado')
     parser.add_argument('-i', '--init', action='store_true', help='Inicializar base de datos desde cero')

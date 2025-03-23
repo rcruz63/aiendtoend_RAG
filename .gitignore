@@ -37,3 +37,6 @@ data/
 *.db
 *.sqlite
 *.sqlite3
+
+# Archivos de Test
+test_catalogo/
