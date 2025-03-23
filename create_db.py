@@ -24,7 +24,7 @@ Fecha: 2025-03-22
 
 import os
 from pathlib import Path
-from typing import List, Dict, Generator
+from typing import List, Dict, Generator, Tuple
 import numpy as np
 from tqdm import tqdm
 from database import Database
@@ -338,6 +338,8 @@ def get_embedding(text: str, test_mode: bool = False) -> np.ndarray:
             logging.info(f"Llamando a OpenAI API para obtener embedding de texto de {len(text)} caracteres")
             start_time = datetime.now()
         
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("openai").setLevel(logging.WARNING)
         response = openai.embeddings.create(
             # model="text-embedding-ada-002",
             model="text-embedding-3-large",
@@ -387,73 +389,82 @@ def cargar_documentos(data_path: str) -> Generator[Dict[str, str], None, None]:
         except Exception as e:
             logging.error(f"Error al cargar {archivo}: {e}")
 
-def documento_procesado(db: Database, ruta_archivo: str) -> bool:
+def documento_procesado(db: Database, ruta_archivo: str) -> Tuple[bool, int, int]:
     """
-    Verifica si un documento ya ha sido procesado y almacenado en la base de datos.
+    Verifica el estado de procesamiento de un documento en la base de datos.
     
     Args:
         db (Database): Instancia de la base de datos
         ruta_archivo (str): Ruta del archivo a verificar
     
     Returns:
-        bool: True si el documento ya está procesado, False en caso contrario
+        Tuple[bool, int, int]: 
+            - bool: True si el documento está completamente procesado
+            - int: Número de chunks existentes en la base de datos
+            - int: ID del último chunk procesado
     """
     conn = db.get_connection()
     cursor = conn.cursor()
     
-    cursor.execute('''
-    SELECT COUNT(*) 
-    FROM chunks_metadata 
-    WHERE ruta_archivo = ?
-    ''', (ruta_archivo,))
-    
-    count = cursor.fetchone()[0]
-    conn.close()
-    
-    return count > 0
+    try:
+        # Obtener el número de chunks y el último ID
+        cursor.execute('''
+        SELECT COUNT(*), COALESCE(MAX(id), 0)
+        FROM chunks_metadata 
+        WHERE ruta_archivo = ?
+        ''', (ruta_archivo,))
+        
+        chunks_existentes, ultimo_id = cursor.fetchone()
+        return chunks_existentes, ultimo_id
+        
+    finally:
+        conn.close()
 
 def procesar_documento(db: Database, documento: Dict[str, str], test_mode: bool = False) -> None:
     """
     Procesa un documento individual, dividiéndolo en chunks y guardando sus embeddings.
     
     El proceso incluye:
-    1. Verificar si el documento ya está procesado
-    2. Dividir el documento en chunks
-    3. Generar embedding para cada chunk
-    4. Almacenar chunks y embeddings en la base de datos
+    1. Dividir el documento en chunks
+    2. Verificar chunks existentes en la base de datos
+    3. Procesar solo los chunks faltantes
+    4. Almacenar nuevos chunks y embeddings
     
     Args:
         db (Database): Instancia de la base de datos
-        documento (Dict[str, str]): Documento a procesar con campos:
-            - titulo: Título del documento
-            - ruta_archivo: Ruta al archivo
-            - contenido: Contenido del documento
-        test_mode (bool): Si True, muestra información detallada del proceso
-    
-    Raises:
-        Exception: Si hay errores durante el procesamiento
+        documento (Dict[str, str]): Documento a procesar
+        test_mode (bool): Si True, muestra información detallada
     """
-    # Verificar si el documento ya está procesado
-    if documento_procesado(db, documento['ruta_archivo']):
-        if test_mode:
-            logging.info(f"El documento {documento['titulo']} ya está procesado, saltando...")
-        return
+    logging.info(f"Procesando documento: {documento['titulo']}")
     
     if test_mode:
-        logging.info(f"Procesando documento: {documento['titulo']}")
         logging.info(f"Tamaño del documento: {len(documento['contenido'])} caracteres")
     
     # Dividir en chunks
     chunks = chunker(documento['contenido'])
-    if test_mode:
-        logging.info(f"Documento dividido en {len(chunks)} chunks")
+    total_chunks = len(chunks)
+    logging.info(f"Documento dividido en {total_chunks} chunks")
     
-    # Procesar cada chunk
-    for i, chunk in enumerate(chunks, 1):
+    # Verificar chunks existentes
+    chunks_existentes, _ = documento_procesado(db, documento['ruta_archivo'])
+    
+    if chunks_existentes == total_chunks:
+        logging.info(f"Documento {documento['titulo']} ya está completamente procesado ({chunks_existentes}/{total_chunks} chunks)")
+        return
+    elif chunks_existentes > 0:
+        logging.warning(f"Documento {documento['titulo']} parcialmente procesado ({chunks_existentes}/{total_chunks} chunks)")
+        logging.info(f"Continuando desde el chunk {chunks_existentes + 1}")
+    
+    # Procesar chunks faltantes
+    for i, chunk in enumerate(chunks[chunks_existentes:], chunks_existentes + 1):
         try:
             if test_mode:
-                logging.info(f"Procesando chunk {i}/{len(chunks)}")
+                logging.info(f"Procesando chunk {i}/{total_chunks}")
                 logging.info(f"Tamaño del chunk: {len(chunk)} caracteres")
+            else:
+                # Mostrar progreso cada 100 chunks o al finalizar
+                if i % 100 == 0 or i == total_chunks:
+                    logging.info(f"Procesados {i}/{total_chunks} chunks")
             
             # Calcular el embedding
             embedding = get_embedding(chunk, test_mode)
@@ -481,6 +492,7 @@ def procesar_documento(db: Database, documento: Dict[str, str], test_mode: bool 
                 
         except Exception as e:
             logging.error(f"Error al procesar chunk {i} en {documento['titulo']}: {e}")
+            raise
 
 def generate_rag(test_mode: bool = False):
     """
@@ -535,6 +547,8 @@ def main():
         level=logging.INFO if args.test else logging.WARNING,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
+
+    logging.getLogger("openai").setLevel(logging.WARNING)
     
     # Verificar entorno
     verificar_entorno()

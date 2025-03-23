@@ -1,3 +1,20 @@
+"""
+Módulo para la gestión de la base de datos vectorial SQLite.
+
+Este módulo implementa la clase Database que maneja todas las operaciones de base de datos
+para el sistema RAG, incluyendo:
+- Almacenamiento de chunks de texto y sus embeddings
+- Búsqueda de similitud vectorial
+- Gestión de metadatos de documentos
+- Operaciones CRUD básicas
+
+La base de datos utiliza la extensión sqlite-vec para realizar búsquedas de similitud
+vectorial eficientes, permitiendo encontrar los chunks más relevantes para una consulta.
+
+Autor: RCS
+Fecha: 2024-03-22
+"""
+
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
@@ -8,14 +25,50 @@ import struct
 import apsw
 
 def serialize(vector: List[float]) -> bytes:
-    """Serializa una lista de floats en formato de bytes compacto"""
+    """
+    Serializa una lista de números flotantes en un formato de bytes compacto.
+    
+    Esta función es utilizada para convertir los vectores de embedding en un formato
+    que puede ser almacenado y procesado eficientemente por sqlite-vec.
+    
+    Args:
+        vector (List[float]): Lista de números flotantes a serializar
+        
+    Returns:
+        bytes: Datos serializados en formato de bytes
+    """
     return struct.pack("%sf" % len(vector), *vector)
 
 class Database:
+    """
+    Clase para gestionar la base de datos vectorial SQLite.
+    
+    Esta clase maneja todas las operaciones de base de datos necesarias para el sistema RAG,
+    incluyendo la inserción, recuperación y búsqueda de chunks de texto y sus embeddings.
+    
+    La base de datos utiliza dos tablas principales:
+    - chunks_metadata: Almacena información sobre los fragmentos de texto
+    - chunks_embeddings: Almacena los vectores de embedding
+    
+    Attributes:
+        db_path (Path): Ruta al archivo de base de datos SQLite
+    """
+    
     def __init__(self):
+        """
+        Inicializa la conexión a la base de datos.
+        
+        La base de datos se encuentra en el directorio 'data' con el nombre 'catalogo.db'.
+        """
         self.db_path = Path("data") / "catalogo.db"
         
     def get_connection(self):
+        """
+        Obtiene una conexión a la base de datos con la extensión sqlite-vec habilitada.
+        
+        Returns:
+            apsw.Connection: Conexión a la base de datos configurada
+        """
         conn = apsw.Connection(str(self.db_path))
         # Habilitar y cargar la extensión sqlite-vec
         conn.enableloadextension(True)
@@ -28,17 +81,23 @@ class Database:
         """
         Inserta un chunk y su embedding en la base de datos.
         
+        Esta operación es atómica y utiliza transacciones para garantizar la integridad
+        de los datos. Si ocurre algún error, la transacción se revierte automáticamente.
+        
         Args:
-            ruta_archivo: Ruta del archivo original
-            titulo: Título del documento
-            contenido: Contenido del chunk
-            embedding: Vector de embedding
-            inicio: Posición inicial en el documento original
-            fin: Posición final en el documento original
-            test_mode: Si es True, muestra información detallada
+            ruta_archivo (str): Ruta del archivo original
+            titulo (str): Título del documento
+            contenido (str): Contenido del chunk
+            embedding (np.ndarray): Vector de embedding
+            inicio (int): Posición inicial en el documento original
+            fin (int): Posición final en el documento original
+            test_mode (bool): Si es True, muestra información detallada
             
         Returns:
             int: ID del chunk insertado
+            
+        Raises:
+            Exception: Si ocurre un error durante la inserción
         """
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -84,7 +143,16 @@ class Database:
             conn.close()
     
     def get_chunk(self, chunk_id: int, test_mode: bool = False) -> Optional[Dict[str, Any]]:
-        """Obtiene un chunk y su embedding por ID"""
+        """
+        Obtiene un chunk y su embedding por ID.
+        
+        Args:
+            chunk_id (int): ID del chunk a recuperar
+            test_mode (bool): Si es True, muestra información detallada
+            
+        Returns:
+            Optional[Dict[str, Any]]: Diccionario con la información del chunk o None si no existe
+        """
         if test_mode:
             logging.info(f"Obteniendo chunk con ID: {chunk_id}")
             start_time = datetime.now()
@@ -126,7 +194,20 @@ class Database:
     
     def buscar_chunks_similares(self, embedding: np.ndarray, 
                               top_k: int = 5, test_mode: bool = False) -> List[Dict[str, Any]]:
-        """Busca los chunks más similares a un embedding dado"""
+        """
+        Busca los chunks más similares a un embedding dado.
+        
+        Utiliza la función de similitud de sqlite-vec para encontrar los chunks
+        más cercanos al vector de embedding proporcionado.
+        
+        Args:
+            embedding (np.ndarray): Vector de embedding para la búsqueda
+            top_k (int): Número de resultados a retornar
+            test_mode (bool): Si es True, muestra información detallada
+            
+        Returns:
+            List[Dict[str, Any]]: Lista de chunks ordenados por similitud
+        """
         if test_mode:
             logging.info(f"Buscando {top_k} chunks similares")
             start_time = datetime.now()
@@ -173,7 +254,16 @@ class Database:
         return resultados
     
     def get_chunks_archivo(self, ruta_archivo: str, test_mode: bool = False) -> List[Dict[str, Any]]:
-        """Obtiene todos los chunks de un archivo"""
+        """
+        Obtiene todos los chunks de un archivo específico.
+        
+        Args:
+            ruta_archivo (str): Ruta del archivo del que se quieren obtener los chunks
+            test_mode (bool): Si es True, muestra información detallada
+            
+        Returns:
+            List[Dict[str, Any]]: Lista de chunks ordenados por posición en el archivo
+        """
         if test_mode:
             logging.info(f"Obteniendo chunks del archivo: {ruta_archivo}")
             start_time = datetime.now()

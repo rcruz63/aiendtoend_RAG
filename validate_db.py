@@ -1,3 +1,20 @@
+"""
+Script para validar la integridad y estructura de la base de datos RAG.
+
+Este script realiza una serie de verificaciones sobre la base de datos SQLite que almacena
+los chunks y embeddings del sistema RAG, incluyendo:
+- Estructura de las tablas
+- Conteo de registros
+- Documentos procesados
+- Integridad de los datos
+
+Uso:
+    python validate_db.py
+
+Autor: RCS
+Fecha: 2024-03-22
+"""
+
 import logging
 from pathlib import Path
 import apsw
@@ -11,7 +28,18 @@ logging.basicConfig(
 )
 
 def get_connection():
-    """Obtiene una conexión a la base de datos con la extensión sqlite-vec cargada"""
+    """
+    Obtiene una conexión a la base de datos con la extensión sqlite-vec cargada.
+    
+    Configura la conexión a la base de datos SQLite y carga la extensión sqlite-vec
+    necesaria para las operaciones con vectores.
+    
+    Returns:
+        apsw.Connection: Conexión configurada a la base de datos
+        
+    Raises:
+        Exception: Si hay un error al conectar o cargar la extensión
+    """
     db_path = Path("data") / "catalogo.db"
     conn = apsw.Connection(str(db_path))
     conn.enableloadextension(True)
@@ -20,7 +48,24 @@ def get_connection():
     return conn
 
 def validar_base_datos():
-    """Valida el contenido de la base de datos"""
+    """
+    Realiza una validación completa de la base de datos RAG.
+    
+    Proceso de validación:
+    1. Verifica la estructura de las tablas existentes
+    2. Cuenta el número de registros en cada tabla
+    3. Lista los documentos procesados y sus chunks
+    4. Verifica la integridad de los datos (coincidencia chunks-embeddings)
+    
+    La función muestra información detallada sobre:
+    - Tablas y vistas en la base de datos
+    - Total de chunks y embeddings
+    - Documentos procesados con sus rutas y número de chunks
+    - Problemas de integridad encontrados
+    
+    Raises:
+        Exception: Si hay un error durante la validación
+    """
     try:
         conn = get_connection()
         cursor = conn.cursor()
