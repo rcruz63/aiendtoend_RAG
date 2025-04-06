@@ -23,6 +23,7 @@ import logging
 import sqlite_vec
 import struct
 import apsw
+import hashlib
 
 def serialize(vector: List[float]) -> bytes:
     """
@@ -83,6 +84,7 @@ class Database:
         
         Esta operación es atómica y utiliza transacciones para garantizar la integridad
         de los datos. Si ocurre algún error, la transacción se revierte automáticamente.
+        También calcula y almacena el hash del chunk en la tabla de caché.
         
         Args:
             ruta_archivo (str): Ruta del archivo original
@@ -126,11 +128,18 @@ class Database:
             VALUES (?, ?)
             ''', (chunk_id, embedding_bytes))
             
+            # Calcular e insertar el hash en la caché
+            chunk_hash = hashlib.sha256(contenido.encode('utf-8')).hexdigest()
+            cursor.execute('''
+            INSERT INTO chunks_cache (hash, chunk_id)
+            VALUES (?, ?)
+            ''', (chunk_hash, chunk_id))
+            
             # Confirmar transacción
             cursor.execute("COMMIT")
             
             if test_mode:
-                logging.info(f"Chunk insertado con ID: {chunk_id}")
+                logging.info(f"Chunk insertado con ID: {chunk_id} y hash añadido a caché")
             
             return chunk_id
             
