@@ -207,9 +207,11 @@ def realizar_consulta(query: str, test_mode: bool = False) -> str:
         logging.info(f"Procesando consulta: {query}")
         start_time = datetime.now()
     
-    # 1. Obtener embedding y buscar chunks similares
-    query_embedding = get_embedding(query, test_mode)
+    # Inicializar base de datos
     db = Database()
+    
+    # 1. Obtener embedding y buscar chunks similares
+    query_embedding = get_embedding(query, db, test_mode)
     resultados = db.buscar_chunks_similares(
         embedding=query_embedding,
         top_k=5,

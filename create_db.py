@@ -24,7 +24,7 @@ Fecha: 2025-03-22
 
 import os
 from pathlib import Path
-from typing import List, Dict, Generator, Tuple
+from typing import List, Dict, Generator, Tuple, Optional
 import numpy as np
 from tqdm import tqdm
 from database import Database
@@ -37,6 +37,8 @@ import sqlite_vec
 import struct
 import apsw
 import platform
+import hashlib
+import pickle
 
 # Configurar logging
 logging.basicConfig(
@@ -121,6 +123,7 @@ def init_database():
     4. Crea las tablas necesarias:
        - chunks_metadata: Almacena metadatos de los fragmentos de texto
        - chunks_embeddings: Almacena los vectores de embedding
+       - embeddings_cache: Almacena los hashes y embeddings para caché
     5. Crea índices para optimizar las consultas
     
     Raises:
@@ -173,9 +176,19 @@ def init_database():
         )
         ''')
         
+        # Crear tabla de caché de embeddings
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS embeddings_cache (
+            hash TEXT PRIMARY KEY,
+            embedding BLOB NOT NULL,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
         # Crear índices para mejorar el rendimiento
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_titulo ON chunks_metadata(titulo)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_ruta ON chunks_metadata(ruta_archivo)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cache_hash ON embeddings_cache(hash)')
         
         # Confirmar transacción
         cursor.execute("COMMIT")
@@ -200,6 +213,7 @@ def create_database():
     La estructura de la base de datos incluye:
     - Tabla chunks_metadata: Almacena metadatos de los fragmentos
     - Tabla chunks_embeddings: Almacena vectores de embedding
+    - Tabla embeddings_cache: Almacena hashes y embeddings para caché
     - Índices para optimización de consultas
     
     Raises:
@@ -247,9 +261,19 @@ def create_database():
         )
         ''')
         
+        # Crear tabla de caché de embeddings si no existe
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS embeddings_cache (
+            hash TEXT PRIMARY KEY,
+            embedding BLOB NOT NULL,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
         # Crear índices si no existen
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_titulo ON chunks_metadata(titulo)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_ruta ON chunks_metadata(ruta_archivo)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cache_hash ON embeddings_cache(hash)')
         
         # Confirmar transacción
         cursor.execute("COMMIT")
@@ -313,18 +337,16 @@ def chunker(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
         
     return chunks
 
-def get_embedding(text: str, test_mode: bool = False) -> np.ndarray:
+def get_embedding(text: str, db: Database, test_mode: bool = False) -> np.ndarray:
     """
-    Obtiene el vector de embedding para un texto usando la API de OpenAI.
+    Obtiene el vector de embedding para un texto usando la API de OpenAI o la caché.
     
-    OLD: Utiliza el modelo text-embedding-ada-002 de OpenAI para generar
-    embeddings de 1536 dimensiones.
-
-    NEW: Utiliza el modelo text-embedding-3-large de OpenAI para generar
-    embeddings de 1536 dimensiones.
+    Primero intenta obtener el embedding desde la caché. Si no existe,
+    lo obtiene de la API de OpenAI y lo guarda en la caché.
     
     Args:
         text (str): Texto para el que se quiere obtener el embedding
+        db (Database): Instancia de la base de datos
         test_mode (bool): Si True, muestra información detallada del proceso
     
     Returns:
@@ -334,6 +356,13 @@ def get_embedding(text: str, test_mode: bool = False) -> np.ndarray:
         Exception: Si hay un error en la llamada a la API de OpenAI
     """
     try:
+        # Intentar obtener de la caché
+        embedding_cache = obtener_embedding_cache(text, db)
+        if embedding_cache is not None:
+            if test_mode:
+                logging.info("Embedding obtenido de la caché")
+            return embedding_cache
+            
         if test_mode:
             logging.info(f"Llamando a OpenAI API para obtener embedding de texto de {len(text)} caracteres")
             start_time = datetime.now()
@@ -341,18 +370,23 @@ def get_embedding(text: str, test_mode: bool = False) -> np.ndarray:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("openai").setLevel(logging.WARNING)
         response = openai.embeddings.create(
-            # model="text-embedding-ada-002",
             model="text-embedding-3-large",
             dimensions=1536,
             input=text
         )
         
+        embedding = np.array(response.data[0].embedding)
+        
+        # Guardar en caché
+        guardar_embedding_cache(text, embedding, db)
+        
         if test_mode:
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
             logging.info(f"Respuesta recibida de OpenAI API en {duration:.2f} segundos")
+            logging.info("Embedding guardado en caché")
         
-        return np.array(response.data[0].embedding)
+        return embedding
     except Exception as e:
         logging.error(f"Error al obtener embedding: {e}")
         raise
@@ -486,7 +520,7 @@ def procesar_documento(db: Database, documento: Dict[str, str], chunk_size: int 
                 continue
             
             # Calcular el embedding solo si el chunk no existe
-            embedding = get_embedding(chunk, test_mode)
+            embedding = get_embedding(chunk, db, test_mode)
             
             if test_mode:
                 logging.info(f"Guardando chunk en la base de datos (posiciones {inicio}-{fin})")
@@ -541,6 +575,117 @@ def generate_rag(test_mode: bool = False, chunk_size: int = 1000, overlap: int =
         except Exception as e:
             logging.error(f"Error al procesar {documento['titulo']}: {e}")
 
+def calcular_hash_chunk(chunk: str) -> str:
+    """
+    Calcula el hash SHA-256 de un chunk de texto.
+    
+    Args:
+        chunk (str): Texto del chunk
+        
+    Returns:
+        str: Hash SHA-256 del chunk
+    """
+    return hashlib.sha256(chunk.encode('utf-8')).hexdigest()
+
+def obtener_embedding_cache(chunk: str, db: Database) -> Optional[np.ndarray]:
+    """
+    Intenta obtener el embedding de un chunk desde la caché.
+    
+    Args:
+        chunk (str): Texto del chunk
+        db (Database): Instancia de la base de datos
+        
+    Returns:
+        Optional[np.ndarray]: Embedding si existe en caché, None si no
+    """
+    chunk_hash = calcular_hash_chunk(chunk)
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+        SELECT embedding 
+        FROM embeddings_cache 
+        WHERE hash = ?
+        ''', (chunk_hash,))
+        
+        resultado = cursor.fetchone()
+        if resultado:
+            return pickle.loads(resultado[0])
+        return None
+        
+    finally:
+        conn.close()
+
+def guardar_embedding_cache(chunk: str, embedding: np.ndarray, db: Database) -> None:
+    """
+    Guarda un embedding en la caché.
+    
+    Args:
+        chunk (str): Texto del chunk
+        embedding (np.ndarray): Vector de embedding
+        db (Database): Instancia de la base de datos
+    """
+    chunk_hash = calcular_hash_chunk(chunk)
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Iniciar transacción
+        cursor.execute("BEGIN TRANSACTION")
+        
+        cursor.execute('''
+        INSERT OR REPLACE INTO embeddings_cache (hash, embedding)
+        VALUES (?, ?)
+        ''', (chunk_hash, pickle.dumps(embedding)))
+        
+        # Confirmar transacción
+        cursor.execute("COMMIT")
+    except Exception as e:
+        # En caso de error, revertir cambios
+        cursor.execute("ROLLBACK")
+        raise e
+    finally:
+        conn.close()
+
+def inicializar_cache_existente(db: Database, test_mode: bool = False) -> None:
+    """
+    Inicializa la caché con los embeddings existentes en la base de datos.
+    
+    Args:
+        db (Database): Instancia de la base de datos
+        test_mode (bool): Si True, muestra información detallada
+    """
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Obtener todos los chunks y sus embeddings
+        cursor.execute('''
+        SELECT m.contenido, e.embedding
+        FROM chunks_metadata m
+        JOIN chunks_embeddings e ON m.id = e.id
+        ''')
+        
+        chunks = cursor.fetchall()
+        total_chunks = len(chunks)
+        
+        if test_mode:
+            logging.info(f"Procesando {total_chunks} chunks para la caché")
+        
+        for i, (contenido, embedding) in enumerate(chunks, 1):
+            if test_mode and i % 100 == 0:
+                logging.info(f"Procesados {i}/{total_chunks} chunks")
+            
+            # Guardar en caché
+            guardar_embedding_cache(contenido, np.array(embedding), db)
+        
+        if test_mode:
+            logging.info("Caché inicializada con éxito")
+            
+    finally:
+        conn.close()
+
 def main():
     """
     Función principal que coordina la ejecución del script.
@@ -550,17 +695,20 @@ def main():
     --init (-i): Inicializa la base de datos desde cero
     --chunk-size (-c): Tamaño de cada chunk en caracteres (default: 1000)
     --overlap (-o): Número de caracteres que se solapan entre chunks (default: 200)
+    --init-cache (-ic): Inicializa la caché con los embeddings existentes
     
     El proceso completo incluye:
     1. Verificación del entorno
     2. Inicialización/creación de la base de datos
-    3. Generación del sistema RAG
+    3. Inicialización de la caché (si se solicita)
+    4. Generación del sistema RAG
     """
     parser = argparse.ArgumentParser(description='Genera embeddings para documentos markdown')
     parser.add_argument('-t', '--test', action='store_true', help='Modo test con logging detallado')
     parser.add_argument('-i', '--init', action='store_true', help='Inicializar base de datos desde cero')
     parser.add_argument('-c', '--chunk-size', type=int, default=1000, help='Tamaño de cada chunk en caracteres (default: 1000)')
     parser.add_argument('-o', '--overlap', type=int, default=200, help='Número de caracteres que se solapan entre chunks (default: 200)')
+    parser.add_argument('-ic', '--init-cache', action='store_true', help='Inicializar la caché con embeddings existentes')
     args = parser.parse_args()
     
     # Configurar logging
@@ -580,6 +728,14 @@ def main():
     else:
         # Crear base de datos si no existe
         create_database()
+    
+    # Inicializar base de datos
+    db = Database()
+    
+    # Inicializar caché si se solicita
+    if args.init_cache:
+        logging.info("Inicializando caché de embeddings...")
+        inicializar_cache_existente(db, test_mode=args.test)
     
     # Generar RAG con los parámetros especificados
     generate_rag(test_mode=args.test, chunk_size=args.chunk_size, overlap=args.overlap)
