@@ -1,4 +1,5 @@
 import re
+from pprint import pprint
 
 import click
 from openai import OpenAI
@@ -11,17 +12,19 @@ def llm(messages: list[dict]) -> str:
         model="gpt-4o-mini",
         messages=messages,
     )
+    pprint(f"Respuesta LLM: {response.choices[0].message.content}")
+    pprint(response)
     return response.choices[0].message.content
 
 
 system_prompt = """
-Tienes a tu disposición una herramientas: VIAJES. Esta herramienta responde preguntas sobre ofertas de viajes exclusivamente.
+Tienes a tu disposición una herramientas: VIAJES. Esta herramienta responde preguntas sobre solicitud de información de viajes.
 Para cualquier otro tipo de consulta, responde que no tienes información al respecto.
 
 Para llamar a esa herramienta usa esta sintaxis:
 
 ```python
-VIAJES("expresion")
+VIAJES("pregunta")
 ```
 
 Crea un bloque de código siempre que llames a una herramienta. Si son varias, puedes crear varios bloques de código.
@@ -35,7 +38,7 @@ Crea un bloque de código siempre que llames a una herramienta. Si son varias, p
 @click.option("--prompt", "-p", required=True, help="The prompt to send to the LLM")
 def main(prompt):
     history = run_agent(prompt)
-    print(history[-1]["content"])
+    pprint(history[-1]["content"])
 
 
 def run_agent(prompt):
@@ -43,11 +46,12 @@ def run_agent(prompt):
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
     ]
+    pprint(f"Historial pre-llm: {history}")
     response = llm(history)
+    pprint(f"Historial pre-procesamiento: {history}")
     history.append({"role": "assistant", "content": response})
-
     process_calc(history, response)
-
+    pprint(f"Historial post-procesamiento: {history}")
     return history
 
 

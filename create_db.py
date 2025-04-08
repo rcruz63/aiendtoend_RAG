@@ -52,6 +52,15 @@ load_dotenv()
 # Configurar OpenAI
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
+titulos = {
+        "cam_25_halcon_viajes_39_mb_1": "Halcon Viajes",
+        "cam_nacional_e_internacional_2025": "NAUTALIA Viajes",
+        "CATALOGO_RUTAS_CAM_2025_compressed": "B Travel | Carrefour Viajes",
+        "rc25_cibeles_v2": "Cibeles",
+        "rc25_veci_ok": "Viajes El Corte Inglés",
+        "rutas_25_bttb_v4": "B Travel",
+        "rutas25_iag7_v3": "IAG7 Viajes",
+    }
 # DATA_PATH = "catalogos_md"
 DATA_PATH = "test_catalogo"
 
@@ -309,7 +318,7 @@ def create_database():
         conn.close()
         logging.info(f"Base de datos lista en: {db_path}")
 
-def chunker(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
+def chunker(text: str, nombre: str, titulo: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
     """
     Divide un texto en fragmentos (chunks) de tamaño fijo con solapamiento.
     
@@ -318,17 +327,13 @@ def chunker(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
     
     Args:
         text (str): Texto a dividir
+        nombre (str): Nombre del archivo
+        titulo (str): Título del catalogo
         chunk_size (int): Tamaño de cada fragmento en caracteres
         overlap (int): Número de caracteres que se solapan entre fragmentos consecutivos
     
     Returns:
         list[str]: Lista de fragmentos de texto
-    
-    Example:
-        >>> texto = "Este es un texto de ejemplo para dividir"
-        >>> chunks = chunker(texto, chunk_size=10, overlap=3)
-        >>> print(chunks)
-        ['Este es un', 'un texto de', 'de ejemplo', 'lo para div']
     """
     if not text:
         return []
@@ -349,7 +354,7 @@ def chunker(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
             end = len(text)
             
         # Añadir el chunk actual
-        chunks.append(text[start:end])
+        chunks.append(f"AGENCIA: {nombre} - TITULO: {titulo}\n\n{text[start:end]}")
         
         # Si llegamos al final del texto, terminamos
         if end == len(text):
@@ -476,8 +481,11 @@ def documento_procesado(db: Database, ruta_archivo: str, chunk_size: int = 1000,
         with open(ruta_archivo, 'r', encoding='utf-8') as f:
             contenido = f.read()
             
+        nombre = Path(ruta_archivo).stem
+        titulo = titulos[nombre]
+            
         # Calcular nuevo número de chunks con los parámetros actuales
-        nuevos_chunks = len(chunker(contenido, chunk_size=chunk_size, overlap=overlap))
+        nuevos_chunks = len(chunker(contenido, nombre, titulo, chunk_size=chunk_size, overlap=overlap))
         
         # Obtener chunks existentes
         cursor.execute('''
@@ -513,7 +521,7 @@ def documento_procesado(db: Database, ruta_archivo: str, chunk_size: int = 1000,
                 logging.warning(f"  Actuales: chunk_size={chunk_size}, overlap={overlap}")
                 
                 # Calcular número de chunks con los parámetros almacenados
-                chunks_anteriores = len(chunker(contenido, chunk_size=stored_chunk_size, overlap=stored_overlap))
+                chunks_anteriores = len(chunker(contenido, nombre, titulo, chunk_size=stored_chunk_size, overlap=stored_overlap))
                 
                 if chunks_existentes == chunks_anteriores:
                     # El documento está completamente procesado con los parámetros anteriores
@@ -628,8 +636,13 @@ def procesar_documento(db: Database, documento: Dict[str, str], chunk_size: int 
         logging.info(f"Tamaño del documento: {len(documento['contenido'])} caracteres")
         logging.info(f"Parámetros: chunk_size={chunk_size}, overlap={overlap}")
     
+    # Inicializar chunks_previos_dict
+    chunks_previos_dict = {}
+    
     # Dividir en chunks
-    chunks = chunker(documento['contenido'], chunk_size=chunk_size, overlap=overlap)
+    nombre = Path(documento['ruta_archivo']).stem
+    titulo = titulos[nombre]
+    chunks = chunker(documento['contenido'], nombre, titulo, chunk_size=chunk_size, overlap=overlap)
     total_chunks = len(chunks)
     logging.info(f"Documento dividido en {total_chunks} chunks")
     

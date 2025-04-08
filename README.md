@@ -16,6 +16,25 @@ Tendremos otro script para realizar la consulta. Recibe la consulta por parametr
 
 A continuación debe concatenar el texto de los fragmentos para aportarlo como contexto al LLM y realizar la consulta.
 
+## Agentes
+
+# Ejercicio sobre agentes.
+
+Aplicar una o varias de estas mejoras al RAG que llama el agente:
+
+### Mejoras de RAG
+
+- [ ] Entrenar tu propio modelo de embeddings
+- [ ] Usar un reranker
+- [ ] Usar un modelo de lenguaje que seleccione embeddings relevantes (caro)
+- [ ] Usar un contexto gigante y no usar RAG
+- [ ] Añadir contexto al RAG
+- [ ] Filtrar con metadatos
+- [ ] RAG especulativo (postfacto)
+- [ ] RAG especulativo (prefacto)
+- [ ] RAG en grafo o memoria en grafo
+
+
 
 
 
